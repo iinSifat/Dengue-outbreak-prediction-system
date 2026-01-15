@@ -181,22 +181,19 @@ def main():
             preprocessor = DengueDataPreprocessor(dengue_path, weather_path)
             X_train_full, X_test_full, y_train_full, y_test_full, processed_df_full, feature_names = preprocessor.run_full_pipeline()
             
-            # Filter by selected region
-            if region:
+            # Always use full data for training models
+            X_train, X_test = X_train_full, X_test_full
+            y_train, y_test = y_train_full, y_test_full
+            
+            # Filter display data by selected region (for charts/stats only)
+            if region and 'Region' in processed_df_full.columns:
                 region_mask = processed_df_full['Region'] == region
                 processed_df = processed_df_full[region_mask].reset_index(drop=True)
-                
-                # Rebuild train/test split for this region
-                n_train = int(len(processed_df) * 0.8)
-                if n_train > 0 and len(processed_df) - n_train > 0:
-                    X_train = X_train_full.iloc[:n_train]
-                    X_test = X_test_full.iloc[n_train:n_train + len(processed_df) - n_train]
-                    y_train = y_train_full.iloc[:n_train]
-                    y_test = y_test_full.iloc[n_train:n_train + len(processed_df) - n_train]
-                else:
-                    X_train, X_test, y_train, y_test = X_train_full, X_test_full, y_train_full, y_test_full
+                # If filtered data is too small, fallback to full data
+                if len(processed_df) < 10:
+                    processed_df = processed_df_full
+                    st.warning(f"⚠️ Limited data for {region}. Showing combined data.")
             else:
-                X_train, X_test, y_train, y_test = X_train_full, X_test_full, y_train_full, y_test_full
                 processed_df = processed_df_full
         
         # Train models
@@ -211,6 +208,10 @@ def main():
         # ========== TAB 1: OVERVIEW ==========
         with tab1:
             st.header("📊 Data Overview")
+            
+            if len(processed_df) == 0:
+                st.error("❌ No data available for selected region")
+                return
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -512,19 +513,22 @@ def main():
             st.markdown("---")
             st.subheader("Next Week Risk Prediction")
             
-            current_risk = processed_df['Risk_Level'].iloc[-1]
-            next_state, probability = markov_model.predict_next_state(current_risk)
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.info(f"**Current State:** {current_risk}")
-            
-            with col2:
-                st.success(f"**Predicted Next State:** {next_state}")
-            
-            with col3:
-                st.warning(f"**Confidence:** {probability:.1%}")
+            if len(processed_df) > 0:
+                current_risk = processed_df['Risk_Level'].iloc[-1]
+                next_state, probability = markov_model.predict_next_state(current_risk)
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.info(f"**Current State:** {current_risk}")
+                
+                with col2:
+                    st.success(f"**Predicted Next State:** {next_state}")
+                
+                with col3:
+                    st.warning(f"**Confidence:** {probability:.1%}")
+            else:
+                st.warning("⚠️ Insufficient data for prediction")
         
         # ========== TAB 4: ANALYSIS ==========
         with tab4:

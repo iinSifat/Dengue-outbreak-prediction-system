@@ -154,12 +154,12 @@ def main():
         ["Dhaka", "Chittagong", "Sylhet", "Khulna", "Rajshahi"]
     )
     
-    # Prediction horizon
-    prediction_weeks = st.sidebar.slider(
-        "Prediction Horizon (weeks)",
+    # Prediction horizon (months)
+    prediction_months = st.sidebar.slider(
+        "Prediction Horizon (months)",
         min_value=1,
-        max_value=24,
-        value=8,
+        max_value=12,
+        value=3,
         step=1
     )
     
@@ -175,11 +175,29 @@ def main():
     ])
     
     try:
-        # Load data
+        # Load data with region filtering
         with st.spinner("Loading and preprocessing data..."):
-            X_train, X_test, y_train, y_test, processed_df, feature_names, preprocessor = load_and_preprocess_data(
-                dengue_path, weather_path
-            )
+            # First load full data
+            preprocessor = DengueDataPreprocessor(dengue_path, weather_path)
+            X_train_full, X_test_full, y_train_full, y_test_full, processed_df_full, feature_names = preprocessor.run_full_pipeline()
+            
+            # Filter by selected region
+            if region:
+                region_mask = processed_df_full['Region'] == region
+                processed_df = processed_df_full[region_mask].reset_index(drop=True)
+                
+                # Rebuild train/test split for this region
+                n_train = int(len(processed_df) * 0.8)
+                if n_train > 0 and len(processed_df) - n_train > 0:
+                    X_train = X_train_full.iloc[:n_train]
+                    X_test = X_test_full.iloc[n_train:n_train + len(processed_df) - n_train]
+                    y_train = y_train_full.iloc[:n_train]
+                    y_test = y_test_full.iloc[n_train:n_train + len(processed_df) - n_train]
+                else:
+                    X_train, X_test, y_train, y_test = X_train_full, X_test_full, y_train_full, y_test_full
+            else:
+                X_train, X_test, y_train, y_test = X_train_full, X_test_full, y_train_full, y_test_full
+                processed_df = processed_df_full
         
         # Train models
         with st.spinner("Training AI models..."):
@@ -301,24 +319,45 @@ def main():
             
             # Future predictions
             st.markdown("---")
-            st.subheader(f"Future Predictions ({prediction_weeks} weeks ahead)")
+            st.subheader(f"Future Predictions ({prediction_months} months ahead)")
             
-            # Create future features (simplified - using last known values)
-            last_features = X_test.iloc[-prediction_weeks:].copy()
-            future_predictions = reg_model.predict(last_features)
+            # Generate monthly predictions
+            last_date = pd.to_datetime(processed_df['Date'].iloc[-1])
+            future_dates = []
+            for i in range(prediction_months):
+                next_month = last_date + pd.DateOffset(months=i+1)
+                future_dates.append(next_month)
             
-            # Generate future dates
-            last_date = processed_df['Date'].iloc[-1]
-            future_dates = [last_date + timedelta(weeks=i+1) for i in range(prediction_weeks)]
+            # Use last row features to predict forward
+            if len(X_test) > 0:
+                last_features = X_test.iloc[-1:].copy()
+                # Repeat for weeks in prediction period
+                n_weeks = prediction_months * 4
+                future_features_list = [last_features.iloc[0:1] for _ in range(min(n_weeks, 52))]
+                future_features = pd.concat(future_features_list, ignore_index=True) if future_features_list else X_test.iloc[-1:]
+                weekly_predictions = reg_model.predict(future_features[:n_weeks] if len(future_features) >= n_weeks else future_features)
+            else:
+                weekly_predictions = reg_model.predict(X_test)
+            
+            # Convert weekly predictions to monthly averages
+            monthly_predictions = []
+            for m in range(prediction_months):
+                start_idx = m * 4
+                end_idx = min((m + 1) * 4, len(weekly_predictions))
+                if start_idx < len(weekly_predictions):
+                    month_avg = weekly_predictions[start_idx:end_idx].mean()
+                    monthly_predictions.append(month_avg)
+                else:
+                    monthly_predictions.append(weekly_predictions[-1] if len(weekly_predictions) > 0 else 100)
             
             # Create prediction dataframe
             future_df = pd.DataFrame({
                 'Date': future_dates,
-                'Predicted_Cases': future_predictions.round(0).astype(int)
+                'Predicted_Cases': np.array(monthly_predictions).round(0).astype(int)
             })
             
             # Classify future risk
-            future_risk = classify_risk_from_cases(future_predictions)
+            future_risk = classify_risk_from_cases(np.array(monthly_predictions))
             future_df['Risk_Level'] = future_risk
             
             # Display predictions

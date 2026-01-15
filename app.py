@@ -191,31 +191,21 @@ def main():
     try:
         # Load data with region filtering
         with st.spinner("Loading and preprocessing data..."):
-            # First load full data
+            # Load full data
             preprocessor = DengueDataPreprocessor(dengue_path, weather_path)
             X_train_full, X_test_full, y_train_full, y_test_full, processed_df_full, feature_names = preprocessor.run_full_pipeline()
             
-            # Filter by selected region for both training and display
-            if region != "All Regions":
-                region_mask = processed_df_full['Region'] == region
-                processed_df_filtered = processed_df_full[region_mask].reset_index(drop=True)
-                
-                if len(processed_df_filtered) > 0:
-                    # Get indices of filtered rows
-                    filtered_indices = processed_df_full[region_mask].index.tolist()
-                    X_train = X_train_full.iloc[filtered_indices[:int(len(filtered_indices)*0.8)]]
-                    X_test = X_test_full.iloc[filtered_indices[int(len(filtered_indices)*0.8):]]
-                    y_train = y_train_full.iloc[filtered_indices[:int(len(filtered_indices)*0.8)]]
-                    y_test = y_test_full.iloc[filtered_indices[int(len(filtered_indices)*0.8):]]
-                    processed_df = processed_df_filtered
-                else:
-                    st.warning(f"⚠️ No data for {region}. Showing all regions.")
-                    X_train, X_test = X_train_full, X_test_full
-                    y_train, y_test = y_train_full, y_test_full
+            # Use full data for model training
+            X_train, X_test = X_train_full, X_test_full
+            y_train, y_test = y_train_full, y_test_full
+            
+            # Filter display data by selected region only
+            if region != "All Regions" and 'Region' in processed_df_full.columns:
+                processed_df = processed_df_full[processed_df_full['Region'] == region].reset_index(drop=True)
+                if len(processed_df) < 10:
+                    st.warning(f"⚠️ Limited data for {region}. Showing combined data.")
                     processed_df = processed_df_full
             else:
-                X_train, X_test = X_train_full, X_test_full
-                y_train, y_test = y_train_full, y_test_full
                 processed_df = processed_df_full
         
         # Train models
@@ -349,38 +339,45 @@ def main():
                         "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12}
             target_month_num = month_map[month]
             
-            # Generate predictions for 12 months starting from now
+            # Get last date from data
             last_date = pd.to_datetime(processed_df['Date'].iloc[-1])
-            future_dates = []
-            for i in range(12):
-                next_month = last_date + pd.DateOffset(months=i+1)
-                future_dates.append(next_month)
             
-            # Use last row features to predict forward
-            if len(X_test) > 0:
-                last_features = X_test.iloc[-1:].copy()
-                n_weeks = 12 * 4
-                future_features_list = [last_features.iloc[0:1] for _ in range(min(n_weeks, 52))]
-                future_features = pd.concat(future_features_list, ignore_index=True) if future_features_list else X_test.iloc[-1:]
-                weekly_predictions = reg_model.predict(future_features[:n_weeks] if len(future_features) >= n_weeks else future_features)
+            # Calculate months to predict ahead
+            target_date = pd.Timestamp(year=year, month=target_month_num, day=1)
+            months_ahead = (target_date.year - last_date.year) * 12 + (target_date.month - last_date.month)
+            
+            if months_ahead < 1:
+                st.error(f"❌ {month} {year} is in the past. Select a future date.")
             else:
-                weekly_predictions = reg_model.predict(X_test)
-            
-            # Convert weekly predictions to monthly averages
-            monthly_predictions = []
-            for m in range(12):
-                start_idx = m * 4
-                end_idx = min((m + 1) * 4, len(weekly_predictions))
-                if start_idx < len(weekly_predictions):
-                    month_avg = weekly_predictions[start_idx:end_idx].mean()
-                    monthly_predictions.append(month_avg)
+                # Generate predictions for all months from now to target
+                future_dates = []
+                for i in range(months_ahead + 1):
+                    next_month = last_date + pd.DateOffset(months=i)
+                    future_dates.append(next_month)
+                
+                # Use last row features to predict forward
+                if len(X_test) > 0:
+                    last_features = X_test.iloc[-1:].copy()
+                    n_weeks = (months_ahead + 1) * 4
+                    future_features_list = [last_features.iloc[0:1] for _ in range(min(n_weeks, 100))]
+                    future_features = pd.concat(future_features_list, ignore_index=True) if future_features_list else X_test.iloc[-1:]
+                    weekly_predictions = reg_model.predict(future_features[:n_weeks] if len(future_features) >= n_weeks else future_features)
                 else:
-                    monthly_predictions.append(weekly_predictions[-1] if len(weekly_predictions) > 0 else 100)
-            
-            # Get prediction for selected year and month
-            target_prediction_index = target_month_num - 1
-            if target_prediction_index < len(monthly_predictions):
-                target_prediction = monthly_predictions[target_prediction_index]
+                    weekly_predictions = np.array([100] * ((months_ahead + 1) * 4))
+                
+                # Convert weekly predictions to monthly averages
+                monthly_predictions = []
+                for m in range(months_ahead + 1):
+                    start_idx = m * 4
+                    end_idx = min((m + 1) * 4, len(weekly_predictions))
+                    if start_idx < len(weekly_predictions):
+                        month_avg = weekly_predictions[start_idx:end_idx].mean()
+                        monthly_predictions.append(month_avg)
+                    else:
+                        monthly_predictions.append(weekly_predictions[-1] if len(weekly_predictions) > 0 else 100)
+                
+                # Get prediction for selected year and month
+                target_prediction = monthly_predictions[-1]
                 target_risk = classify_risk_from_cases(np.array([target_prediction]))[0]
                 
                 col1, col2 = st.columns([2, 1])
@@ -391,21 +388,21 @@ def main():
                     
                     # Plot historical (last 20 weeks)
                     hist_data = processed_df.tail(20)
-                    ax.plot(hist_data['Date'], hist_data['Dengue_Cases'], 
-                           'b-o', linewidth=2, label='Historical', markersize=5)
+                    if len(hist_data) > 0:
+                        ax.plot(hist_data['Date'], hist_data['Dengue_Cases'], 
+                               'b-o', linewidth=2, label='Historical', markersize=5)
                     
                     # Plot future predictions
                     ax.plot(future_dates, monthly_predictions, 
                            'r--s', linewidth=2, label='Predicted', markersize=5, alpha=0.7)
                     
                     # Highlight selected month
-                    target_date = future_dates[target_prediction_index]
                     ax.scatter([target_date], [target_prediction], s=200, color='gold', 
                               edgecolor='red', linewidth=2, zorder=5, label=f'Selected: {month} {year}')
                     
                     ax.set_xlabel('Date', fontweight='bold')
                     ax.set_ylabel('Dengue Cases', fontweight='bold')
-                    ax.set_title('Dengue Case Forecast', fontsize=14, fontweight='bold')
+                    ax.set_title(f'Dengue Case Forecast - {region}', fontsize=14, fontweight='bold')
                     ax.legend()
                     ax.grid(True, alpha=0.3)
                     plt.xticks(rotation=45)
@@ -434,8 +431,6 @@ def main():
                             '<div class="risk-box low-risk">✅ LOW RISK<br>{:.0f} cases</div>'.format(target_prediction),
                             unsafe_allow_html=True
                         )
-            else:
-                st.warning(f"⚠️ Cannot predict {month} {year} - beyond available data range")
             
             # Feature importance
             st.markdown("---")
